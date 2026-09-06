@@ -353,7 +353,7 @@ def main():
     c, d, b1, renewed, exit_code = process(SESSION, ACCOUNT_LABEL)
 
     # 若 session 过期，尝试 Discord 自动登录重试一次
-    if exit_code == EXIT_SESSION_EXPIRED and DISCORD_TOKEN:
+    if exit_code in (EXIT_SESSION_EXPIRED, EXIT_BALANCE_FAIL) and DISCORD_TOKEN:
         er("Session 已过期，尝试 Discord OAuth 自动重新登录...")
         new_session = discord_get_session()
         if new_session:
