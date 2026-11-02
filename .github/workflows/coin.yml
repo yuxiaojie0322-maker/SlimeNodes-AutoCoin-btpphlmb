@@ -5,12 +5,14 @@ on:
     - cron: '30 0,12 * * *'
   workflow_dispatch:
 
+# 赋予 Actions 删除历史运行记录的权限
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   earn-coins:
     runs-on: ubuntu-latest
-    permissions:
-      actions: write
-      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Run auto coin
@@ -25,3 +27,12 @@ jobs:
           RENEW_HOURS: ${{ secrets.RENEW_HOURS || vars.RENEW_HOURS }}
           RENEW_THRESHOLD: ${{ secrets.RENEW_THRESHOLD || vars.RENEW_THRESHOLD }}
         run: python slimenodes.py
+
+      - name: 🧹 清理历史运行记录（仅保留最后 1 次）
+        uses: Mattraks/delete-workflow-runs@v2
+        if: always()
+        with:
+          token: ${{ secrets.GH_TOKEN || github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 1
