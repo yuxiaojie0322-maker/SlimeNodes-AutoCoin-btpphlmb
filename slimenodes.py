@@ -370,7 +370,8 @@ def process(session_id, label="acct"):
     detected_servers = get_user_server_ids(session_id)
     if detected_servers:
         log(f"面板检测到名下服务器: {detected_servers}")
-        if not target_servers or target_servers == ["10102"]:
+        valid_targets = [s for s in target_servers if s in detected_servers]
+        if not valid_targets:
             target_servers = detected_servers
             log(f"已自动切换为实际服务器: {target_servers}")
     elif not target_servers:
