@@ -16,7 +16,7 @@ SESSION = os.environ.get("SLIME_SESSION", "")
 ACCOUNT_LABEL = os.environ.get("ACCOUNT_LABEL", "btpphlmb")
 SERVER_ID = os.environ.get("SERVER_ID", "10102")
 RENEW_THRESHOLD = int(os.environ.get("RENEW_THRESHOLD", "50"))
-RENEW_HOURS = int(os.environ.get("RENEW_HOURS", "24"))  # Only renew if <72h left
+RENEW_HOURS = int(os.environ.get("RENEW_HOURS", "48"))  # 默认到期前48小时内执行续期
 
 # Discord OAuth 自动登录配置
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
@@ -165,7 +165,7 @@ def update_github_secret(secret_name, new_value):
         er(f"更新异常: {e}")
         return False
 
-# ─── 原有刷币/续期逻辑 ──────────────────────────────────────
+# ─── 刷币/续期逻辑 ──────────────────────────────────────
 
 def cooldown(s):
     body = run_curl(["-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(s)}",
@@ -223,14 +223,51 @@ def red(s, url):
     return f"UNK:{loc[:40]}"
 
 def bal(s):
+    """获取余额，并尝试提取当前登录用户名"""
     body = run_curl(["-L", "-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(s)}",
                      f"{BASE}/dashboard"])
     m = re.search(r'balance\.textContent\s*=\s*Math\.floor\((\d+)\s*\*\s*100\)', body)
-    return int(m.group(1)) if m else None
+    balance = int(m.group(1)) if m else None
+    
+    # 提取用户名
+    username = None
+    u_match = re.search(r'navbar-profile-name[^>]*>([^<]+)<', body)
+    if u_match and u_match.group(1).strip():
+        username = u_match.group(1).strip()
+        
+    return balance, username
+
+def get_user_server_ids(s):
+    """从面板获取当前账号名下的真实服务器 ID 列表"""
+    try:
+        body = run_curl(["-L", "-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(s)}",
+                         f"{BASE}/servers"])
+        ids = list(dict.fromkeys(re.findall(r'/(?:servers/edit|delete)\?id=(\d+)', body)))
+        return ids
+    except Exception as e:
+        log(f"获取服务器列表异常: {e}")
+        return []
+
+def get_server_hours_left(s, server_id):
+    """查询指定服务器剩余到期小时数"""
+    cd_body = run_curl(["-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(s)}",
+                        f"{BASE}/lastrenew?id={server_id}"])
+    try:
+        last_renew_ms = json.loads(cd_body).get("lastrenew", 0)
+        if not last_renew_ms:
+            return None
+        now_ms = time.time() * 1000
+        return (last_renew_ms - now_ms) / (1000 * 60 * 60)
+    except Exception:
+        return None
 
 def renew(s, server_id):
-    """Renew server. Returns True if successful."""
+    """Renew server. Returns (success: bool, msg: str)"""
     log(f"Renewing server {server_id}...")
+    
+    # 记录续期前到期时间戳
+    before_hours = get_server_hours_left(s, server_id)
+
     # Use -w to capture final URL after redirects
     cmd = ["curl", "-s", "-L", "-w", "\n%{url_effective}", "--connect-timeout", "20", "--max-time", "20"]
     cmd += ["-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(s)}",
@@ -238,34 +275,53 @@ def renew(s, server_id):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
         output = result.stdout
-        # Last line is the final URL
         lines = output.strip().split("\n")
         final_url = lines[-1] if lines else ""
         body = "\n".join(lines[:-1]) if len(lines) > 1 else ""
         log(f"Renew URL: {final_url[:80]}")
+        
+        # 1. 成功重定向判断
         if "success=RENEWED" in final_url or "RENEWED" in final_url:
-            ok("Server renewed!")
-            return True
+            ok(f"Server {server_id} renewed!")
+            return True, "已续期"
+            
+        # 2. 对比时间戳判断（若时间增加说明面板已续期但未带 RENEWED 参数）
+        time.sleep(1)
+        after_hours = get_server_hours_left(s, server_id)
+        if before_hours is not None and after_hours is not None and after_hours > before_hours:
+            ok(f"Server {server_id} 时间戳已延长 (+{after_hours - before_hours:.1f}h)!")
+            return True, "已续期 (时间已延长)"
+
         if "/login" in final_url:
-            er("Session expired during renew"); return False
-        er(f"Renew failed: {final_url[:80]}")
-        return False
+            er("Session expired during renew")
+            return False, "Session过期"
+            
+        # 提取报错原因
+        clean_msg = ""
+        if "err=" in final_url:
+            clean_msg = final_url.split("err=")[-1].split("&")[0]
+        elif body.strip():
+            clean_body = re.sub(r'<[^>]+>', ' ', body).strip()
+            clean_msg = ' '.join(clean_body.split())[:100]
+            
+        er(f"Renew failed: {final_url[:80]} | 返回信息: {clean_msg or '未知'}")
+        return False, clean_msg or "续期失败"
     except Exception as e:
-        er(f"Renew error: {e}"); return False
+        er(f"Renew error: {e}")
+        return False, str(e)
 
 def process(session_id, label="acct"):
     """
     Earn coins and optionally renew. Returns:
-      (earned, daily_limit_hit, balance_after, renewed, exit_code)
-    exit_code is 0 for OK, non-zero for fatal errors (session expired, balance unavailable, etc).
+      (earned, daily_limit_hit, balance_after, renew_summary, exit_code)
     """
     log(f"\n{'='*40}\n账号: {label}\n{'='*40}")
-    b0 = bal(session_id)
+    b0, detected_user = bal(session_id)
     if b0 is not None:
         log(f"余额: {b0}币")
     else:
         er("无法获取余额 - SID可能已过期或网络问题")
-        return 0, False, None, False, EXIT_BALANCE_FAIL
+        return 0, False, None, {"status": "FAIL", "msg": "无法获取余额"}, EXIT_BALANCE_FAIL
 
     # Earn coins
     earned = 0; bypass = 0; daily = False; session_died = False
@@ -298,41 +354,66 @@ def process(session_id, label="acct"):
         else: er(r)
         time.sleep(random.randint(3, 6))
 
-    b1 = bal(session_id)
+    b1, _ = bal(session_id)
     actual = max(b1 - b0, 0) if b0 is not None and b1 is not None else earned
     log(f"刷币完成: {b1}币 (本次+{actual})")
 
-    # Auto-renew if balance sufficient AND server expiring soon
-    renewed = False
-    if b1 is not None and b1 >= RENEW_THRESHOLD:
-                # Check expiration via API
-        cd_body = run_curl(["-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(session_id)}",
-                            f"{BASE}/lastrenew?id={SERVER_ID}"])
-        hours_left = None
-        try:
-            last_renew_ms = json.loads(cd_body).get("lastrenew", 0)
-            now_ms = time.time() * 1000
-            hours_left = (last_renew_ms - now_ms) / (1000 * 60 * 60)
-            log(f"服务器剩余: {hours_left:.0f}小时")
-        except:
-            log("无法获取到期时间")
-        if hours_left is not None and hours_left > RENEW_HOURS:
-            log(f"离到期还有{hours_left:.0f}小时，暂不续期 (>{RENEW_HOURS}h)")
-        else:
-            renewed = renew(session_id, SERVER_ID)
-            if renewed:
-                b2 = bal(session_id)
-                log(f"续期后余额: {b2}")
-    elif b1 is not None:
-        log(f"余额不足续期 (需要{RENEW_THRESHOLD}币, 当前{b1}币)")
+    # 确定要续期的服务器列表
+    target_servers = []
+    if SERVER_ID and SERVER_ID != "10102":
+        target_servers = [s.strip() for s in SERVER_ID.split(",") if s.strip()]
+        
+    detected_servers = get_user_server_ids(session_id)
+    if detected_servers:
+        log(f"面板检测到名下服务器: {detected_servers}")
+        if not target_servers or target_servers == ["10102"]:
+            target_servers = detected_servers
+            log(f"已自动切换为实际服务器: {target_servers}")
+    elif not target_servers:
+        target_servers = ["10102"]
+
+    # 循环检查与执行续期
+    renew_summary = {
+        "status": "SKIP",
+        "msg": "",
+        "hours_left": None,
+        "details": []
+    }
+    
+    for s_id in target_servers:
+        hl = get_server_hours_left(session_id, s_id)
+        if hl is not None:
+            log(f"服务器 {s_id} 剩余: {hl:.0f}小时")
+            renew_summary["hours_left"] = hl
+            
+        if b1 is not None and b1 >= RENEW_THRESHOLD:
+            if hl is not None and hl > RENEW_HOURS:
+                log(f"服务器 {s_id} 离到期还有 {hl:.0f}小时，暂不续期 (>{RENEW_HOURS}h)")
+                renew_summary["details"].append(f"Server {s_id}: 剩余 {hl:.0f}h 暂不续期")
+            else:
+                success, r_msg = renew(session_id, s_id)
+                if success:
+                    renew_summary["status"] = "SUCCESS"
+                    renew_summary["msg"] = r_msg
+                    renew_summary["details"].append(f"Server {s_id}: {r_msg}")
+                    b1, _ = bal(session_id)
+                    log(f"续期后余额: {b1}")
+                else:
+                    if renew_summary["status"] != "SUCCESS":
+                        renew_summary["status"] = "FAIL"
+                        renew_summary["msg"] = r_msg
+                    renew_summary["details"].append(f"Server {s_id}: 失败 ({r_msg})")
+        elif b1 is not None:
+            log(f"余额不足续期 (需要{RENEW_THRESHOLD}币, 当前{b1}币)")
+            renew_summary["status"] = "LOW_BALANCE"
+            renew_summary["details"].append(f"Server {s_id}: 余额不足({b1}币)")
 
     # Decide exit code
     if session_died:
-        return actual, daily, b1, renewed, EXIT_SESSION_EXPIRED
+        return actual, daily, b1, renew_summary, EXIT_SESSION_EXPIRED
     if earned == 0 and not daily and b1 is not None and b1 == b0:
-        # Tried to earn but got nothing and not daily-limited → likely session/network issue
-        return actual, daily, b1, renewed, EXIT_EARN_FAIL
-    return actual, daily, b1, renewed, EXIT_OK
+        return actual, daily, b1, renew_summary, EXIT_EARN_FAIL
+    return actual, daily, b1, renew_summary, EXIT_OK
 
 
 def main():
@@ -350,7 +431,11 @@ def main():
         else:
             sys.exit(EXIT_NO_SESSION)
 
-    c, d, b1, renewed, exit_code = process(SESSION, ACCOUNT_LABEL)
+    # 尝试读取面板真实用户名
+    _, detected_username = bal(SESSION)
+    label = detected_username if (detected_username and ACCOUNT_LABEL == "btpphlmb") else ACCOUNT_LABEL
+
+    c, d, b1, renew_summary, exit_code = process(SESSION, label)
 
     # 若 session 过期，尝试 Discord 自动登录重试一次
     if exit_code in (EXIT_SESSION_EXPIRED, EXIT_BALANCE_FAIL) and DISCORD_TOKEN:
@@ -360,22 +445,17 @@ def main():
             ok("Discord 自动登录成功，更新 secret 并重试")
             update_github_secret("SLIME_SESSION", new_session)
             SESSION = new_session
-            c, d, b1, renewed, exit_code = process(SESSION, ACCOUNT_LABEL)
+            _, detected_username = bal(SESSION)
+            label = detected_username if (detected_username and ACCOUNT_LABEL == "btpphlmb") else ACCOUNT_LABEL
+            c, d, b1, renew_summary, exit_code = process(SESSION, label)
     
-    # Get expiration info
-    hours_left = None
-    cd_body = run_curl(["-H", f"User-Agent: {UA}", "-H", f"Cookie: {ck(SESSION)}",
-                        f"{BASE}/lastrenew?id={SERVER_ID}"])
-    try:
-        last_renew_ms = json.loads(cd_body).get("lastrenew", 0)
-        now_ms = time.time() * 1000
-        hours_left = (last_renew_ms - now_ms) / (1000 * 60 * 60)
-    except: pass
+    # 获取最新的到期时间
+    hours_left = renew_summary.get("hours_left")
     
     # Build detailed TG message
     lines = ["<b>🟢 SlimeNodes 刷币通知</b>"]
     lines.append(f"━━━━━━━━━━━━━━━━")
-    lines.append(f"👤 账号: {ACCOUNT_LABEL}")
+    lines.append(f"👤 账号: {label}")
     lines.append(f"━━━━━━━━━━━━━━━━")
     
     s = "✅" if c > 0 else "❌"
@@ -392,12 +472,18 @@ def main():
         days = hours_left / 24
         lines.append(f"⏰ 到期: {hours_left:.0f}小时后 ({days:.1f}天)")
     
-    if renewed:
-        lines.append(f"🔄 续期: ✅ 已续期")
+    r_status = renew_summary.get("status")
+    r_msg = renew_summary.get("msg", "")
+    if r_status == "SUCCESS":
+        lines.append(f"🔄 续期: ✅ {r_msg or '已续期'}")
+    elif r_status == "FAIL":
+        lines.append(f"🔄 续期: ❌ 续期失败 ({r_msg or '请检查ServerID'})")
+    elif r_status == "LOW_BALANCE":
+        lines.append(f"🔄 续期: ⚠️ 余额不足 (需{RENEW_THRESHOLD}币)")
     elif hours_left is not None and hours_left > RENEW_HOURS:
         lines.append(f"🔄 续期: ⏭️ 暂不需要 (>{RENEW_HOURS}h)")
-    elif b1 is not None and b1 < RENEW_THRESHOLD:
-        lines.append(f"🔄 续期: ⚠️ 余额不足 (需{RENEW_THRESHOLD}币)")
+    elif renew_summary.get("details"):
+        lines.append(f"🔄 续期: {'; '.join(renew_summary['details'])}")
     
     lines.append(f"━━━━━━━━━━━━━━━━")
     send_tg("\n".join(lines))

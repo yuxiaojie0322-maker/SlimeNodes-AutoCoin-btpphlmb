@@ -20,4 +20,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SERVER_ID: ${{ secrets.SERVER_ID || vars.SERVER_ID }}
+          ACCOUNT_LABEL: ${{ secrets.ACCOUNT_LABEL || vars.ACCOUNT_LABEL }}
+          RENEW_HOURS: ${{ secrets.RENEW_HOURS || vars.RENEW_HOURS }}
+          RENEW_THRESHOLD: ${{ secrets.RENEW_THRESHOLD || vars.RENEW_THRESHOLD }}
         run: python slimenodes.py
