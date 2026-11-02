@@ -7,16 +7,20 @@ from datetime import datetime, timezone
 BASE = "https://dash.slimenodes.com"
 CPC = 12
 WAIT = 16
-MAX = int(os.environ.get("MAX_ADS", "20"))
+def get_env_int(key, default):
+    v = os.environ.get(key, "").strip()
+    return int(v) if v.isdigit() else default
+
+MAX = get_env_int("MAX_ADS", 20)
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-TGT = os.environ.get("TG_BOT_TOKEN", "")
-TGC = os.environ.get("TG_CHAT_ID", "")
-PX = os.environ.get("SOCKS_PROXY", os.environ.get("HTTP_PROXY", ""))
-SESSION = os.environ.get("SLIME_SESSION", "")
-ACCOUNT_LABEL = os.environ.get("ACCOUNT_LABEL", "btpphlmb")
-SERVER_ID = os.environ.get("SERVER_ID", "10102")
-RENEW_THRESHOLD = int(os.environ.get("RENEW_THRESHOLD", "50"))
-RENEW_HOURS = int(os.environ.get("RENEW_HOURS", "48"))  # 默认到期前48小时内执行续期
+TGT = os.environ.get("TG_BOT_TOKEN", "").strip()
+TGC = os.environ.get("TG_CHAT_ID", "").strip()
+PX = os.environ.get("SOCKS_PROXY", os.environ.get("HTTP_PROXY", "")).strip()
+SESSION = os.environ.get("SLIME_SESSION", "").strip()
+ACCOUNT_LABEL = os.environ.get("ACCOUNT_LABEL", "").strip() or "btpphlmb"
+SERVER_ID = os.environ.get("SERVER_ID", "").strip() or "10102"
+RENEW_THRESHOLD = get_env_int("RENEW_THRESHOLD", 50)
+RENEW_HOURS = get_env_int("RENEW_HOURS", 48)  # 默认到期前48小时内执行续期
 
 # Discord OAuth 自动登录配置
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
